@@ -1,0 +1,71 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Product {
+  id        Int      @id @default(autoincrement())
+  sku       String   @unique
+  name      String
+  price     Int
+  createdAt DateTime @default(now())
+
+  stock          Stock?          @relation(fields: [stockProductId], references: [productId])
+  stockMovements StockMovement[]
+  orderItems     OrderItem[]
+  stockProductId Int?
+}
+
+model Stock {
+  productId Int       @id
+  quantity  Int       @default(0)
+  updatedAt DateTime  @updatedAt
+  products  Product[]
+}
+
+model StockMovement {
+  id        Int      @id @default(autoincrement())
+  productId Int
+  delta     Int
+  reason    String
+  createdAt DateTime @default(now())
+
+  product Product @relation(fields: [productId], references: [id])
+}
+
+model Order {
+  id         Int         @id @default(autoincrement())
+  status     OrderStatus @default(PENDING)
+  totalPrice Int         @default(0)
+  createdAt  DateTime    @default(now())
+
+  items OrderItem[]
+}
+
+model OrderItem {
+  id        Int @id @default(autoincrement())
+  orderId   Int
+  productId Int
+
+  qty       Int
+  unitPrice Int
+  lineTotal Int
+
+  order   Order   @relation(fields: [orderId], references: [id])
+  product Product @relation(fields: [productId], references: [id])
+}
+
+enum OrderStatus {
+  PENDING
+  PAID
+  CANCELLED
+}
