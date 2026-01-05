@@ -1,14 +1,15 @@
 import "dotenv/config";
 import express from "express";
-import { z } from "zod";
+import { includes, z } from "zod";
 import { prisma } from "./prisma";
+import { ca, tr } from "zod/v4/locales";
 
 const app = express();
 app.use(express.json());                                                    //JSON Read
 
 // 0) 서버가 살아있는지 확인
 app.get("/health", (_req, res) => {
-    res.json({ok: true});
+    res.json({ ok: true });
 });
 
 // 1) 제품 등록
@@ -192,6 +193,124 @@ app.post("/orders", async (req, res) => {
     } catch (e: any) {
         res.status(400).json({ message: e?.message ?? "Create order failed" });
     }
+});
+
+app.post("/orders/:id/cancel", async (req, res) => {
+    const orderId = Number(req.params.id);
+    if (!Number.isFinite(orderId)) return res.status(400).json({ message: "Invalid order id" });
+
+    try {
+        const cancelled = await prisma.$transaction(async (tx) => {
+            // 1) 주문 조회 (+ items)
+            const order = await tx.order.findUnique({
+                where: { id: orderId },
+                include: { items: true },
+            });
+
+            if (!order) throw new Error("Order not found");
+
+            // 2) 이미 취소된 주문 확인
+            if(order.status === "CANCELLED") {
+                return order;
+            }
+
+            // 3) 상태 체크
+            if (order.status !== "PENDING") {
+                throw new Error("Only PENDING orders can be cancelled");
+            }
+
+            // 4) 주문 상태 변경
+            const updatedOrder = await tx.order.update({
+                where: { id: orderId },
+                data: { status: "CANCELLED" },
+            });
+
+            // 5) 재고 롤백 + 이력 남기기
+            for (const item of order.items) {
+                // stock의 없을 경우를 위한 upsert
+                const stock = await tx.stock.upsert({
+                    where: { productId: item.productId },
+                    create: { productId: item.productId, quantity: 0 },
+                    update: {},
+                });
+
+                await tx.stock.update({
+                    where: { productId: item.productId },
+                    data: { quantity: stock.quantity + item.qty },
+                });
+
+                await tx.stockMovement.create({
+                    data: {
+                        productId: item.productId,
+                        delta: item.qty,
+                        reason: `CANCEL#${orderId}`,
+                    },
+                });
+            }
+
+            return updatedOrder;
+        });
+
+        res.json(cancelled);
+    } catch (e:any) {
+        res.status(400).json({ message: e?.message ?? "Cancel failed"});
+    }
+});
+
+app.get("/orders", async (req, res) => {
+    // query string은 무조건 string(또는 undefined)으로 들어온다
+    // 예: /orders?limit=50
+
+    const limitRaw = req.query.limit;
+    const limit = typeof limitRaw === "string" ? Math.min(Math.max(parseInt(limitRaw, 10), 1), 100) : 20;
+
+    const statusRaw = req.query.status;
+    const status = 
+        typeof statusRaw === "string" && ["PENDING", "PAID", "CANCELLED"].includes(statusRaw) ? (statusRaw as "PENDING" | "PAID" | "CANCELLED") : undefined;
+
+    try {
+        const orders = await prisma.order.findMany({
+            where: (status ? { status } : {}),
+            orderBy: { createdAt: "desc" },
+            take: limit,
+            include: {
+                items: { include: {product: true } },
+            },
+        });
+
+        res.json({ limit, status: status ?? null, orders });
+    } catch (e: any) {
+        res.status(500).json({ message: e?.message ?? "List orders failed" });
+    }
+});
+
+app.get("/orders/:id", async (req, res) => {
+    const orderId = Number(req.params.id);
+
+    if (!Number.isFinite(orderId)) {
+        return res.status(400).json({ message: "Invalid order id" });
+    }
+
+    try {
+        const order = await prisma.order.findUnique({
+            where: {id: orderId },
+            include: { 
+                items: { 
+                    include: { 
+                        product: true,
+                    },
+                },
+            },
+        });
+
+        if (!order) {
+            return res.status(404).json({ message: "Order not found" });
+        }
+
+        res.json(order);
+    } catch (e: any) {
+        res.status(500).json({ message: e?.message ?? "Get order failed" });
+    };
 });
 
 const port = Number(process.env.PORT ?? 3000);
